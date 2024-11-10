@@ -3,113 +3,148 @@ using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Security.Cryptography;
 
 [AttributeUsage(AttributeTargets.Property | AttributeTargets.Field, AllowMultiple = false)]
 public class PasswordPolicyAttribute : ValidationAttribute
 {
-    public int MinimumLength { get; set; } = 8;
-    public int MaximumLength { get; set; } = 128;
-    public bool RequireUppercase { get; set; } = true;
-    public bool RequireLowercase { get; set; } = true;
-    public bool RequireSpecialChar { get; set; } = true;
-    public int MinimumSpecialChars { get; set; } = 1;
-    public bool RequireDigit { get; set; } = true;
-    public bool NoConsecutiveRepeatedChars { get; set; } = true;
-    public bool NoSequentialChars { get; set; } = true;
-    public bool NoDictionaryWords { get; set; } = true;
-    public string ExcludedChars { get; set; } = "";
-    public string ErrorSeparator { get; set; } = " ";
-
-    // Basic dictionary of common words for simplicity; replace or expand for production use
-    private static readonly HashSet<string> CommonWords = new HashSet<string>
+    public class PolicyOptions
     {
-        "password", "123456", "qwerty", "abc123", "letmein", "welcome", "admin"
-    };
+        public int MinimumLength { get; set; } = 12;  // Increased from 8 for better security
+        public int MaximumLength { get; set; } = 128;
+        public bool RequireUppercase { get; set; } = true;
+        public bool RequireLowercase { get; set; } = true;
+        public bool RequireSpecialChar { get; set; } = true;
+        public int MinimumSpecialChars { get; set; } = 1;
+        public bool RequireDigit { get; set; } = true;
+        public int MinimumDigits { get; set; } = 1;
+        public bool NoConsecutiveRepeatedChars { get; set; } = true;
+        public int MaxConsecutiveRepeats { get; set; } = 2;
+        public bool NoSequentialChars { get; set; } = true;
+        public bool NoDictionaryWords { get; set; } = true;
+        public string ExcludedChars { get; set; } = "";
+        public string ErrorSeparator { get; set; } = " ";
+        public int MinimumUniqueChars { get; set; } = 8;
+        public double MinimumEntropy { get; set; } = 50.0; // Minimum password entropy in bits
+    }
 
-    public PasswordPolicyAttribute(int minimumLength = 8, int maximumLength = 128, bool requireUppercase = true,
-                                   bool requireLowercase = true, bool requireSpecialChar = true,
-                                   int minimumSpecialChars = 1, bool requireDigit = true,
-                                   bool noConsecutiveRepeatedChars = true, bool noSequentialChars = true,
-                                   bool noDictionaryWords = true, string excludedChars = "", string errorSeparator = " ")
+    private readonly PolicyOptions _options;
+    private static readonly Lazy<HashSet<string>> CommonWords = new Lazy<HashSet<string>>(LoadCommonWords);
+
+    public PasswordPolicyAttribute()
     {
-        MinimumLength = minimumLength;
-        MaximumLength = maximumLength;
-        RequireUppercase = requireUppercase;
-        RequireLowercase = requireLowercase;
-        RequireSpecialChar = requireSpecialChar;
-        MinimumSpecialChars = minimumSpecialChars;
-        RequireDigit = requireDigit;
-        NoConsecutiveRepeatedChars = noConsecutiveRepeatedChars;
-        NoSequentialChars = noSequentialChars;
-        NoDictionaryWords = noDictionaryWords;
-        ExcludedChars = excludedChars;
-        ErrorSeparator = errorSeparator;
+        _options = new PolicyOptions();
+    }
+
+    public PasswordPolicyAttribute(PolicyOptions options)
+    {
+        _options = options ?? throw new ArgumentNullException(nameof(options));
     }
 
     protected override ValidationResult IsValid(object value, ValidationContext validationContext)
     {
-        var password = value as string;
-        var errorMessages = new List<string>();
+        if (value is not string password)
+        {
+            return new ValidationResult("Password must be a string value.");
+        }
 
+        var validationResults = ValidatePassword(password).ToList();
+
+        return validationResults.Any()
+            ? new ValidationResult(string.Join(_options.ErrorSeparator, validationResults))
+            : ValidationResult.Success;
+    }
+
+    private IEnumerable<string> ValidatePassword(string password)
+    {
         if (string.IsNullOrEmpty(password))
-            errorMessages.Add("Password is required.");
+        {
+            yield return "Password is required.";
+            yield break;
+        }
 
-        if (password.Length < MinimumLength)
-            errorMessages.Add($"Password must be at least {MinimumLength} characters long.");
+        var validationRules = new List<(Func<string, bool> Rule, string ErrorMessage)>
+        {
+            (p => p.Length >= _options.MinimumLength, 
+             $"Password must be at least {_options.MinimumLength} characters long."),
+            
+            (p => p.Length <= _options.MaximumLength, 
+             $"Password must not exceed {_options.MaximumLength} characters."),
+            
+            (p => !_options.RequireUppercase || p.Any(char.IsUpper), 
+             "Password must contain at least one uppercase letter."),
+            
+            (p => !_options.RequireLowercase || p.Any(char.IsLower), 
+             "Password must contain at least one lowercase letter."),
+            
+            (p => !_options.RequireSpecialChar || p.Count(c => !char.IsLetterOrDigit(c)) >= _options.MinimumSpecialChars,
+             $"Password must contain at least {_options.MinimumSpecialChars} special character(s)."),
+            
+            (p => !_options.RequireDigit || p.Count(char.IsDigit) >= _options.MinimumDigits,
+             $"Password must contain at least {_options.MinimumDigits} numeric digit(s)."),
+            
+            (p => !_options.NoConsecutiveRepeatedChars || !HasConsecutiveRepeatedChars(p),
+             $"Password must not contain more than {_options.MaxConsecutiveRepeats} consecutive repeated characters."),
+            
+            (p => !_options.NoSequentialChars || !HasSequentialCharacters(p),
+             "Password must not contain sequential characters."),
+            
+            (p => !_options.NoDictionaryWords || !ContainsDictionaryWord(p),
+             "Password must not contain common dictionary words."),
+            
+            (p => string.IsNullOrEmpty(_options.ExcludedChars) || !p.Any(c => _options.ExcludedChars.Contains(c)),
+             $"Password must not contain any of the following characters: {_options.ExcludedChars}"),
+            
+            (p => p.Distinct().Count() >= _options.MinimumUniqueChars,
+             $"Password must contain at least {_options.MinimumUniqueChars} unique characters."),
+            
+            (p => CalculatePasswordEntropy(p) >= _options.MinimumEntropy,
+             $"Password is not complex enough. Please use a more varied combination of characters.")
+        };
 
-        if (password.Length > MaximumLength)
-            errorMessages.Add($"Password must not exceed {MaximumLength} characters.");
-
-        if (RequireUppercase && !password.Any(char.IsUpper))
-            errorMessages.Add("Password must contain at least one uppercase letter.");
-
-        if (RequireLowercase && !password.Any(char.IsLower))
-            errorMessages.Add("Password must contain at least one lowercase letter.");
-
-        if (RequireSpecialChar && password.Count(c => !char.IsLetterOrDigit(c)) < MinimumSpecialChars)
-            errorMessages.Add($"Password must contain at least {MinimumSpecialChars} special character(s).");
-
-        if (RequireDigit && !password.Any(char.IsDigit))
-            errorMessages.Add("Password must contain at least one numeric digit.");
-
-        if (NoConsecutiveRepeatedChars && HasConsecutiveRepeatedChars(password))
-            errorMessages.Add("Password must not contain consecutive repeated characters.");
-
-        if (NoSequentialChars && HasSequentialCharacters(password))
-            errorMessages.Add("Password must not contain sequential characters.");
-
-        if (NoDictionaryWords && ContainsDictionaryWord(password))
-            errorMessages.Add("Password must not contain common dictionary words.");
-
-        if (!string.IsNullOrEmpty(ExcludedChars) && password.Any(c => ExcludedChars.Contains(c)))
-            errorMessages.Add($"Password must not contain any of the following characters: {ExcludedChars}");
-
-        // Return all error messages if there are any errors, else return success
-        if (errorMessages.Any())
-            return new ValidationResult(string.Join(ErrorSeparator, errorMessages));
-
-        return ValidationResult.Success;
+        foreach (var (rule, errorMessage) in validationRules)
+        {
+            if (!rule(password))
+            {
+                yield return errorMessage;
+            }
+        }
     }
 
     private bool HasConsecutiveRepeatedChars(string password)
     {
+        int consecutiveCount = 1;
         for (int i = 1; i < password.Length; i++)
         {
             if (password[i] == password[i - 1])
-                return true;
+            {
+                consecutiveCount++;
+                if (consecutiveCount > _options.MaxConsecutiveRepeats)
+                    return true;
+            }
+            else
+            {
+                consecutiveCount = 1;
+            }
         }
         return false;
     }
 
     private bool HasSequentialCharacters(string password)
     {
-        // Check for ascending or descending sequences
-        for (int i = 2; i < password.Length; i++)
+        string[] commonSequences = { "abcdefghijklmnopqrstuvwxyz", "0123456789" };
+        var lowercasePassword = password.ToLower();
+
+        foreach (var sequence in commonSequences)
         {
-            if ((password[i] == password[i - 1] + 1 && password[i - 1] == password[i - 2] + 1) ||  // ascending
-                (password[i] == password[i - 1] - 1 && password[i - 1] == password[i - 2] - 1))    // descending
+            for (int i = 0; i < sequence.Length - 2; i++)
             {
-                return true;
+                var pattern = sequence.Substring(i, 3);
+                if (lowercasePassword.Contains(pattern) || 
+                    lowercasePassword.Contains(new string(pattern.Reverse().ToArray())))
+                {
+                    return true;
+                }
             }
         }
         return false;
@@ -118,6 +153,51 @@ public class PasswordPolicyAttribute : ValidationAttribute
     private bool ContainsDictionaryWord(string password)
     {
         var lowercasePassword = password.ToLower();
-        return CommonWords.Any(word => lowercasePassword.Contains(word));
+        return CommonWords.Value.Any(word => 
+            word.Length >= 4 && lowercasePassword.Contains(word));
     }
+
+    private static HashSet<string> LoadCommonWords()
+    {
+        // In a real implementation, load from a file or database
+        return new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "password", "123456", "qwerty", "abc123", "letmein", "welcome", "admin",
+            "monkey", "dragon", "baseball", "football", "master", "hello", "shadow"
+            // Add more common words as needed
+        };
+    }
+
+    private double CalculatePasswordEntropy(string password)
+    {
+        var charSetSize = 0;
+        if (password.Any(char.IsLower)) charSetSize += 26;
+        if (password.Any(char.IsUpper)) charSetSize += 26;
+        if (password.Any(char.IsDigit)) charSetSize += 10;
+        if (password.Any(c => !char.IsLetterOrDigit(c))) charSetSize += 32;
+
+        return password.Length * Math.Log2(charSetSize);
+    }
+}
+
+// Example usage:
+public class UserAccount
+{
+    public string Username { get; set; }
+
+    [PasswordPolicy]
+    public string Password { get; set; }
+
+    // Or with custom options:
+    /*
+    [PasswordPolicy(new PolicyOptions 
+    {
+        MinimumLength = 14,
+        MinimumSpecialChars = 2,
+        MinimumDigits = 2,
+        MinimumUniqueChars = 10,
+        MinimumEntropy = 60.0
+    })]
+    public string Password { get; set; }
+    */
 }
