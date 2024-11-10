@@ -189,7 +189,6 @@ public class UserAccount
     public string Password { get; set; }
 
     // Or with custom options:
-    /*
     [PasswordPolicy(new PolicyOptions 
     {
         MinimumLength = 14,
@@ -198,6 +197,5 @@ public class UserAccount
         MinimumUniqueChars = 10,
         MinimumEntropy = 60.0
     })]
-    public string Password { get; set; }
-    */
+    public string Password2 { get; set; }
 }
